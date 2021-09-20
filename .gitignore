@@ -1,0 +1,16 @@
+build/
+.DS_Store
+.vscode
+.vs
+CMakeSettings.json
+.clang-format
+*.aux
+*.log
+*.gz
+*.out
+*.ini
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class

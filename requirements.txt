@@ -1,0 +1,7 @@
+taichi==0.7.32
+numpy==1.21.2
+matplotlib
+flake8
+pre-commit
+black
+sphinx
