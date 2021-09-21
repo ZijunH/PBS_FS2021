@@ -20,7 +20,7 @@ class Box(object):
                 [self.vmax[0], self.vmin[1], self.vmax[2]],
                 [self.vmin[0], self.vmax[1], self.vmax[2]],
                 self.vmax,
-            ]
+            ], dtype=np.float32
         )
 
     def indices(self):
@@ -62,7 +62,7 @@ class Box(object):
                 4,
                 5,
                 1,
-            ]
+            ], dtype=np.int32
         )
 
 
@@ -92,8 +92,8 @@ class Plane(object):
             self.center[1],
             self.center[2] + self.size * 0.5,
         ]
-        v = np.array([v0, v1, v2, v3])
+        v = np.array([v0, v1, v2, v3], dtype=np.float32)
         return v
 
     def indices(self):
-        return np.array([0, 1, 2, 0, 2, 3])
+        return np.array([0, 1, 2, 0, 2, 3], dtype=np.int32)
