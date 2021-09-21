@@ -41,7 +41,7 @@ To update your forked repository, check this page: [how-do-i-update-a-github-for
 
 Basically, you are required to add our repository as a remote to your own one:
 ```
-git remote add upstream https://gitlab.ethz.ch/cglsim/pbs20.git
+git remote add upstream https://gitlab.ethz.ch/cglsim/pbs21.git
 ```
 Then, fetch updates from it:
 ```
