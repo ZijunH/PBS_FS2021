@@ -1,10 +1,9 @@
-import sys
 import numpy as np
 import taichi as ti
 import open3d as o3d
-import utils
-import functools 
 import time
+import os
+import json
 
 ti.init(arch=ti.cuda, device_memory_fraction=0.8)
 
@@ -47,6 +46,7 @@ class ImplicitCompressiblePressureSolver:
             k_sum += n_volume * n_diff.dot(n_kernel_d)
         return k_sum
 
+
     def icps(self):
         print("icps begin")
         self.icps_prepare()
@@ -57,8 +57,8 @@ class ImplicitCompressiblePressureSolver:
             # this is actually the residual of hte previous iteration, 
             # so an extra iteration is run
             residual = self.icps_iter()
-            print("    iter", num_iter, "residual%", residual)
             num_iter += 1
+        print("    ran iter", num_iter, "final residual%", residual)
 
     @ti.kernel
     def icps_prepare(self):
@@ -109,7 +109,6 @@ class ImplicitCompressiblePressureSolver:
             lhs_sum += (self.particle.rho_rest[p_i] - self.rho_star[p_i] - lhs) ** 2
             rhs_sum += (self.particle.rho_rest[p_i] - self.rho_star[p_i]) ** 2
             self.p_buf[p_i] = self.to_store[p_i] + self.omega / self.diag[p_i] * (self.particle.rho_rest[p_i] - self.rho_star[p_i] - lhs)
-
         for p_i in range(self.N_snow):
             self.to_store[p_i], self.p_buf[p_i] = self.p_buf[p_i], self.to_store[p_i]
         return (lhs_sum / rhs_sum) ** (1. / 2.)
@@ -227,8 +226,8 @@ class BiCGSTAB:
             
             residual = self.sqnorm(self.r) / rhs_sqnorm
 
-            print("    iter", num_iter, "residual%", residual ** (1. / 2.))
             num_iter += 1
+        print("    ran iter", num_iter, "final residual%", residual  ** (1. / 2.))
 
 
 @ti.data_oriented
@@ -346,12 +345,11 @@ class Particle:
         FLUID = 0
         BOUNDARY = 1
 
-    def __init__(self, N_snow, N_bound, v_range, paused = False, substep = 1, dt = 1e-3):
+    def __init__(self, N_snow, N_bound, v_range, substep = 1, dt = 2e-3):
         self.N_snow = N_snow
         self.N_bound = N_bound
         self.N_tot = N_snow + N_bound
         self.range = v_range
-        self.paused = paused
         self.substep_num = substep
         self.dt = dt
 
@@ -590,7 +588,6 @@ class Particle:
                 self.F[init_i] = ti.Matrix([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
                 init_i += 1
 
-
     @ti.kernel
     def prologue(self):
         for i, j, k in ti.ndrange(*self.grid_size):
@@ -662,48 +659,20 @@ class Particle:
         self.v_x_update()
 
     def step(self):
-        if self.paused:
-            return
         for _ in range(self.substep_num):
             self.substep()
 
-    def toggle_paused(self):
-        self.paused = not self.paused
+    def export_frame(self, folder, file):
+        to_store = os.path.join(folder, file)
+        with open(to_store, 'wb') as f:
+            np.savez(f, x=self.x.to_numpy(dtype=np.float64), 
+                        material_type=self.material_type.to_numpy(dtype=np.float64), 
+                        v=self.v.to_numpy(dtype=np.float64))
 
 
-class Render():
-    def __init__(self, N, obj):
-        # https://github.com/isl-org/Open3D/issues/572
-        self.vis = o3d.visualization.VisualizerWithKeyCallback()
-        self.obj = obj
-
-    def init(self):
-        # converted to flaot64 for speed
-        self.point_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(self.obj.x.to_numpy(dtype=np.float64)))
-        self.point_cloud.paint_uniform_color([1, 0.706, 0])
-        self.vis.add_geometry(self.point_cloud)
-
-    def update(self):
-        self.point_cloud.points = o3d.utility.Vector3dVector(self.obj.x.to_numpy(dtype=np.float64))
-        self.point_cloud.paint_uniform_color([1, 0.706, 0])
-        self.vis.update_geometry(self.point_cloud)
-
-    def create_window(self, *args):
-        return self.vis.create_window(*args)
-    
-    def update_renderer(self, *args):
-        return self.vis.update_renderer(*args)
-
-    def register_key_callback(self, *args):
-        return self.vis.register_key_callback(*args)
-
-    def get_view_control(self, *args):
-        return self.vis.get_view_control(*args)
-
-    def poll_events(self, *args):
-        return self.vis.poll_events(*args)
-
-
+to_save_folder = f"simul_{int(time.time())}"
+to_save_frame = "frame_{}.npy"
+os.makedirs(to_save_folder)
 
 print("Starting")
 N  = 30 * 30 * 30
@@ -711,32 +680,11 @@ snow = 28 * 28 * 29
 v_range = ((0, 1), (0, 1), (0, 1))
 print("\tParticle")
 particle = Particle(snow, N - snow, v_range)
-print("\tRenderer")
-vis = Render(N, particle)
-
-
-def init():
-    particle.init()
-    vis.init()
-
-def reset_sim(R_vis):
-    init()
-
-def pause_sim(R_vis):
-    particle.toggle_paused()
-
-vis.create_window()
-vis.register_key_callback(ord("R"), reset_sim)
-vis.register_key_callback(ord(" "), pause_sim)
-
-ctr = vis.get_view_control()
-ctr.set_lookat([0.0, 0.5, 0.0])
-ctr.set_up([0.0, 1.0, 0.0])
-reset_sim(vis)
-
+particle.init()
+cur_iter_num = 0
+particle.export_frame(to_save_folder, to_save_frame.format(cur_iter_num))
 while True:
+    print(cur_iter_num)
+    cur_iter_num += 1
     particle.step()
-    vis.update()
-    if not vis.poll_events():
-        break
-    vis.update_renderer()
+    particle.export_frame(to_save_folder, to_save_frame.format(cur_iter_num))
