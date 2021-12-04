@@ -11,6 +11,7 @@ class NP_Particle:
 
     class CurrentRender:
         MAT = "material_type"
+        P = "p"
 
     def __init__(self, folder):
         self.folder = folder
@@ -29,6 +30,13 @@ class NP_Particle:
     def get_pos(self):
         return self.arrays["x"]
 
+    def color_bound(self, arr):
+        mat_arr = self.arrays[self.CurrentRender.MAT]
+        if(arr.shape[0] < mat_arr.shape[0]):
+            arr = np.pad(arr, ((0,mat_arr.shape[0] - arr.shape[0]),(0,0)))
+        arr[mat_arr == 1] = np.array([0, 1, 0.706])
+        return arr
+
     def get_attribute(self, attr):
         if(attr == self.CurrentRender.MAT):
             raw_arr = self.arrays[attr]
@@ -36,7 +44,12 @@ class NP_Particle:
             res[raw_arr == 0] = np.array([1, 0.706, 0])
             res[raw_arr == 1] = np.array([0, 1, 0.706])
             return res
-
+        elif(attr == self.CurrentRender.P):
+            raw_arr = self.arrays[attr]
+            p_mag = (raw_arr - np.min(raw_arr)) / (np.max(raw_arr) - np.min(raw_arr))
+            res = np.stack([p_mag, p_mag, np.ones_like(p_mag)], axis=1)
+            res = self.color_bound(res)
+            return res
 
 class Render:
 
