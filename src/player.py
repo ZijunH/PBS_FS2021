@@ -12,6 +12,8 @@ class NP_Particle:
     class CurrentRender:
         MAT = "material_type"
         P = "p"
+        NEIGHBORS_NUM = "neighbors_num"
+        A_LAMBDA = "a_lambda"
 
     def __init__(self, folder):
         self.folder = folder
@@ -48,6 +50,17 @@ class NP_Particle:
             raw_arr = self.arrays[attr]
             p_mag = (raw_arr - np.min(raw_arr)) / (np.max(raw_arr) - np.min(raw_arr))
             res = np.stack([p_mag, p_mag, np.ones_like(p_mag)], axis=1)
+            res = self.color_bound(res)
+            return res
+        elif(attr == self.CurrentRender.NEIGHBORS_NUM):
+            raw_arr = self.arrays[attr]
+            p_mag = (raw_arr - np.min(raw_arr)) / (np.max(raw_arr) - np.min(raw_arr))
+            res = np.stack([p_mag, p_mag, np.ones_like(p_mag)], axis=1)
+            return res
+        elif(attr == self.CurrentRender.A_LAMBDA):
+            raw_arr = self.arrays[attr]
+            raw_arr_norm = np.linalg.norm(raw_arr, axis=1)
+            res = np.ones_like(raw_arr) - raw_arr * np.expand_dims(raw_arr_norm / (np.max(raw_arr_norm) + 0.00001), axis=1)
             res = self.color_bound(res)
             return res
 
@@ -106,10 +119,14 @@ def pause_sim(R_vis):
 def adv_frame(R_vis):
     global i
     i = (i + 1) % num_frames
+    print("frame", i)
+
 
 def prev_frame(R_vis):
     global i
     i = (i - 1) % num_frames
+    print("frame", i)
+
 
 vis.create_window()
 vis.register_key_callback(ord("R"), reset_sim)
@@ -126,6 +143,7 @@ i = 0
 while True:
     if(not paused):
         i = (i + 1) % num_frames
+        print("frame", i)
     particle.load_frame(i)
     vis.update()
     if not vis.poll_events():
