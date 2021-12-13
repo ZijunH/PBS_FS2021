@@ -14,6 +14,7 @@ class NP_Particle:
         P = "p"
         NEIGHBORS_NUM = "neighbors_num"
         A_LAMBDA = "a_lambda"
+        RHO = "rho"
 
     def __init__(self, folder):
         self.folder = folder
@@ -63,6 +64,12 @@ class NP_Particle:
             res = np.ones_like(raw_arr) - raw_arr * np.expand_dims(raw_arr_norm / (np.max(raw_arr_norm) + 0.00001), axis=1)
             res = self.color_bound(res)
             return res
+        elif(attr == self.CurrentRender.RHO):
+            raw_arr = self.arrays[attr]
+            p_mag = np.ones_like(raw_arr) - (raw_arr - np.full_like(raw_arr, 100.0)) / (np.full_like(raw_arr, 1000.0) - np.full_like(raw_arr, 100.0))
+            res = np.stack([p_mag, p_mag, np.ones_like(p_mag), ], axis=1)
+            res = self.color_bound(res)
+            return res
 
 class Render:
 
@@ -110,7 +117,9 @@ def init():
     vis.init()
 
 def reset_sim(R_vis):
-    init()
+    global i
+    i = 0
+    particle.init()
 
 def pause_sim(R_vis):
     global paused
@@ -137,7 +146,7 @@ vis.register_key_callback(ord("A"), prev_frame)
 ctr = vis.get_view_control()
 ctr.set_lookat([0.0, 0.5, 0.0])
 ctr.set_up([0.0, 1.0, 0.0])
-reset_sim(vis)
+init()
 
 i = 0
 while True:

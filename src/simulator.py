@@ -5,7 +5,7 @@ import time
 import os
 import json
 
-ti.init(arch=ti.cuda, device_memory_fraction=0.8)
+ti.init(arch=ti.cuda, device_memory_fraction=0.9)
 
 
 @ti.data_oriented
@@ -17,13 +17,13 @@ class ImplicitCompressiblePressureSolver:
         self.N_bound = particle.N_bound
         self.N_tot = particle.N_snow + particle.N_bound
 
-        self.v_star = ti.Vector.field(3, ti.f32, self.N_tot)
-        self.rho_star = ti.field(ti.f32, self.N_snow)
-        self.diag = ti.field(ti.f32, self.N_snow)
+        self.v_star = ti.Vector.field(3, float, self.N_tot)
+        self.rho_star = ti.field(float, self.N_snow)
+        self.diag = ti.field(float, self.N_snow)
         self.omega = 0.5
-        self.conv_threshold = 1e-4
-        self.conv_iters = 5000
-        self.p_buf = ti.field(ti.f32, self.N_snow)
+        self.conv_threshold = 1e-3
+        self.conv_iters = 500000
+        self.p_buf = ti.field(float, self.N_snow)
 
         self.to_store = ti.static(to_store)
 
@@ -74,7 +74,7 @@ class ImplicitCompressiblePressureSolver:
             div_v = self.disc_div(p_i, self.v_star)
             self.rho_star[p_i] = self.particle.rho[p_i] - self.particle.dt * self.particle.rho[p_i] * div_v
             # Eq. 8
-            j_first_sum = ti.cast(0.0, ti.f32)
+            j_first_sum = ti.cast(0.0, float)
             j_second_sum = ti.Vector([0.0, 0.0, 0.0])
             b_sum = ti.Vector([0.0, 0.0, 0.0])
             for neighbor_i in range(self.particle.neighbors_num[p_i]):
@@ -90,7 +90,7 @@ class ImplicitCompressiblePressureSolver:
                              - self.particle.dt ** 2 * (j_second_sum + self.particle.psi * b_sum).dot(j_second_sum + b_sum) 
 
     @ti.kernel
-    def icps_iter(self) -> ti.f32:
+    def icps_iter(self) -> float:
         # Alg 2, line 8
         for p_i in range(self.N_snow):
             self.particle.calc_d_p(p_i)
@@ -110,19 +110,21 @@ class ImplicitCompressiblePressureSolver:
         return (lhs_sum / (rhs_sum + 0.00001)) ** (1. / 2.)
 
 
+# https://eigen.tuxfamily.org/dox/BiCGSTAB_8h_source.html
 @ti.data_oriented
 class BiCGSTAB:
 
     EPS = 7./3 - 4./3 - 1
     EPS2 = EPS * EPS
 
-    def __init__(self, N, lhs_func, rhs, x, max_iter, tol):
+    def __init__(self, N, lhs_func, rhs, x, max_iter, tol, with_guess=False):
         self.lhs_func = lhs_func
-        self.rhs = rhs
+        self.rhs = ti.static(rhs)
         self.max_iter = max_iter
-        self.x = x
+        self.x = ti.static(x)
         self.tol = tol
         self.N = N
+        self.with_guess = with_guess
 
         self.r = ti.Vector.field(3, float, self.N)
         self.r0 = ti.Vector.field(3, float, self.N)
@@ -135,7 +137,8 @@ class BiCGSTAB:
     @ti.kernel
     def prepare(self):
         for i in range(self.N):
-            self.x[i] = ti.Vector([0.0, 0.0, 0.0])
+            if(not self.with_guess):
+                self.x[i] = ti.Vector([0.0, 0.0, 0.0])
 
             self.r[i] = ti.Vector([0.0, 0.0, 0.0])
             self.r0[i] = ti.Vector([0.0, 0.0, 0.0])
@@ -145,14 +148,14 @@ class BiCGSTAB:
             self.t[i] = ti.Vector([0.0, 0.0, 0.0])
 
     @ti.kernel
-    def sqnorm(self, to_calc: ti.template()) -> ti.float32:
+    def sqnorm(self, to_calc: ti.template()) -> float:
         res = 0.0
         for i in range(self.N):
             res += to_calc[i].norm_sqr()
         return res
 
     @ti.kernel
-    def dot(self, to_calc1: ti.template(), to_calc2: ti.template()) -> ti.float32:
+    def dot(self, to_calc1: ti.template(), to_calc2: ti.template()) -> float:
         res = 0.0
         for i in range(self.N):
             res += to_calc1[i].dot(to_calc2[i])
@@ -163,22 +166,22 @@ class BiCGSTAB:
         self.sub(self.rhs, self.temp, self.r)
 
     @ti.kernel
-    def sub(self, sub_from: ti.template(), sub_to: ti.template(), store: ti.template()) -> ti.float32:
+    def sub(self, sub_from: ti.template(), sub_to: ti.template(), store: ti.template()) -> float:
         for i in range(self.N):
             store[i] = sub_from[i] - sub_to[i]
 
     @ti.kernel
-    def copy_over(self, from_v: ti.template(), to_v: ti.template()) -> ti.float32:
+    def copy_over(self, from_v: ti.template(), to_v: ti.template()) -> float:
         for i in range(self.N):
             to_v[i] = from_v[i]
 
     @ti.kernel
-    def sub_scale_vec(self, to_sub: ti.template(), scale: ti.float32, vec: ti.template(), store: ti.template()) -> ti.float32:
+    def sub_scale_vec(self, to_sub: ti.template(), scale: float, vec: ti.template(), store: ti.template()) -> float:
         for i in range(self.N):
             store[i] = to_sub[i] - scale * vec[i]
 
     @ti.kernel
-    def update_x(self, a: ti.float32, w: ti.float32):
+    def update_x(self, a: float, w: float):
         for i in range(self.N):
             self.x[i] += a * self.p[i] + w * self.s[i]
 
@@ -194,7 +197,7 @@ class BiCGSTAB:
         self.copy_over(self.r, self.r0)
         r0_sqnorm = self.sqnorm(self.r0)
         residual = r0_sqnorm / (rhs_sqnorm + 0.00001)
-
+        
         num_iter = 0
         while(num_iter < self.max_iter and residual >= self.tol * self.tol):
             rho_old = rho
@@ -204,7 +207,10 @@ class BiCGSTAB:
                 self.copy_over(self.r, self.r0)
                 r0_sqnorm = self.sqnorm(self.r0)
                 rho = r0_sqnorm
-            b = (rho / rho_old) * (a / w)
+            if(w != 0):
+                b = (rho / rho_old) * (a / w)
+            else:
+                b = 0.0
             self.sub_scale_vec(self.p, w, self.v, self.temp)
             self.sub_scale_vec(self.r, -b, self.temp, self.p)
             self.lhs_func(self.p, self.v)
@@ -216,12 +222,13 @@ class BiCGSTAB:
             if(t_sqnorm > 0):
                 w = self.dot(self.t, self.s) / t_sqnorm
             else:
-                w = 0
+                w = 0.0
             self.update_x(a, w)
-            self.calc_res()
-            
+            self.sub_scale_vec(self.s, w, self.t, self.r)
             residual = self.sqnorm(self.r) / (rhs_sqnorm + 0.00001)
             num_iter += 1
+            if(num_iter % 1000 == 0):
+                print(num_iter, residual ** (1. / 2.))
         print("    ran iter", num_iter, "final residual%", residual ** (1. / 2.))
 
 
@@ -236,7 +243,7 @@ class ImplicitShearSolver:
         self.N_bound = particle.N_bound
         self.N_tot = particle.N_snow + particle.N_bound
         self.v_star = ti.Vector.field(3, float, self.N_tot)
-        self.temp_stress_tensor = ti.Matrix.field(3, 3, ti.f32, self.N_snow)
+        self.temp_stress_tensor = ti.Matrix.field(3, 3, float, self.N_snow)
 
         # result
         self.rhs = ti.Vector.field(3, float, self.N_snow)
@@ -258,7 +265,7 @@ class ImplicitShearSolver:
             v_d = self.disc_grad(p_i, self.v_star)
             F_star = self.particle.F[p_i] + self.particle.dt * v_d @ self.particle.F[p_i]
             F_star_T = F_star.transpose()
-            self.temp_stress_tensor[p_i] = self.particle.lame_G[p_i] * (F_star + F_star_T - 2 * self.I_3) 
+            self.temp_stress_tensor[p_i] = 2.0 * self.particle.lame_G[p_i] * (0.5 * (F_star + F_star_T) - self.I_3) 
         for p_i in range(self.N_snow):
             self.rhs[p_i] = self.disc_div_stress(p_i) / self.particle.rho[p_i]
 
@@ -278,7 +285,7 @@ class ImplicitShearSolver:
             if(self.particle.material_type[n_i] == Particle.Materials.BOUNDARY):
                 n_kernel_d = self.particle.kernel_cubic_d(self.particle.x[p_i] - self.particle.x[n_i], self.particle.cutoff_radius)
                 b_sum += n_volume * self.particle.L_i[p_i] @ n_kernel_d
-        mirrored_cauchy = 1 / 3 * self.temp_stress_tensor[p_i].trace() * self.I_3
+        mirrored_cauchy = 1.0 / 3.0 * self.temp_stress_tensor[p_i].trace() * self.I_3
         return j_sum + mirrored_cauchy @ b_sum 
 
     @ti.func
@@ -298,7 +305,7 @@ class ImplicitShearSolver:
                 d_v_j += n_diff.outer_product(n_volume * n_kernel_d)
             elif(self.particle.material_type[n_i] == Particle.Materials.BOUNDARY):
                 n_diff = ti.Vector([0.0, 0.0, 0.0])
-                if(to_grad.shape[0] == self.N_snow):
+                if(to_grad.shape[0] <= p_i):
                     n_diff = -to_grad[p_i]
                 else:
                     n_diff = to_grad[n_i] - to_grad[p_i]
@@ -314,7 +321,6 @@ class ImplicitShearSolver:
         tild_S = 1 / 2 * (tild_d_v + tild_d_v_T) - 1 / 3 * tild_d_v.trace() * self.I_3
         return tild_R + prim_V + tild_S
 
-
     @ti.kernel
     def lhs_func(self, inp_v: ti.template(), out_v: ti.template()):
         for p_i in range(self.N_snow):
@@ -325,11 +331,10 @@ class ImplicitShearSolver:
             pre_sub = self.disc_div_stress(p_i) * self.particle.dt / self.particle.rho[p_i]
             out_v[p_i] = inp_v[p_i] - pre_sub
 
-    # https://eigen.tuxfamily.org/dox/BiCGSTAB_8h_source.html
     def BiCGSTAB(self):
-        max_iter = 500
-        tol = 1e-4
-        solver = BiCGSTAB(self.N_snow, self.lhs_func, self.rhs, self.x, max_iter, tol)
+        max_iter = 50000
+        tol = 1e-3
+        solver = BiCGSTAB(self.N_snow, self.lhs_func, self.rhs, self.x, max_iter, tol, with_guess=True)
         solver.solve()
 
 
@@ -340,7 +345,7 @@ class Particle:
         FLUID = 0
         BOUNDARY = 1
 
-    def __init__(self, N_snow, N_bound, v_range, mass=0.02, cutoff_radius=0.075, substep = 1, dt = 4e-3):
+    def __init__(self, N_snow, N_bound, v_range, mass=0.02, cutoff_radius=0.075, substep=1, dt=1e-3, boundary_call_back=None, young=140000, friction=1.0, enable_shear=True):
         self.N_snow = N_snow
         self.N_bound = N_bound
         self.N_tot = N_snow + N_bound
@@ -349,39 +354,42 @@ class Particle:
         self.range_end = ti.Vector([self.range[0, 1], self.range[1, 1], self.range[2, 1]])
         self.substep_num = substep
         self.dt = dt
+        self.boundary_call_back = boundary_call_back
+        self.total_t = ti.field(float, ())
+        self.enable_shear = enable_shear
 
         # material properties
-        self.young = 140
+        self.young = young
         self.poisson = 0.2
         self.harden = 10
         self.rho_0 = 400
         self.psi = 1.5 # motivated by Akinci et al.
         self.clamp_l = 1 - 0.025
         self.clamp_h = 1 + 0.0075
-        self.friction = 1
-        self.volume_scaling = 0.8
+        self.friction = friction
+        self.volume_scaling = 8.0
 
         # all particle properties
         self.m = mass
-        self.x = ti.Vector.field(3, ti.f32, self.N_tot)
+        self.x = ti.Vector.field(3, float, self.N_tot)
         self.material_type = ti.field(ti.i32, self.N_tot)
-        self.v = ti.Vector.field(3, ti.f32, self.N_tot)
+        self.v = ti.Vector.field(3, float, self.N_tot)
 
         # snow particle properties
-        self.p = ti.field(ti.f32, self.N_snow)
-        self.d_p = ti.Vector.field(3, ti.f32, self.N_snow)
-        self.rho = ti.field(ti.f32, self.N_snow)
-        self.rho_rest = ti.field(ti.f32, self.N_snow)
-        self.F = ti.Matrix.field(3, 3, ti.f32, self.N_snow) # deformation gradient
+        self.p = ti.field(float, self.N_snow)
+        self.d_p = ti.Vector.field(3, float, self.N_snow)
+        self.rho = ti.field(float, self.N_snow)
+        self.rho_rest = ti.field(float, self.N_snow)
+        self.F = ti.Matrix.field(3, 3, float, self.N_snow) # deformation gradient
         self.L_i = ti.Matrix.field(3, 3, float, self.N_snow)
         self.lame_lambda = ti.field(float, self.N_snow)
         self.lame_G = ti.field(float, self.N_snow)
 
         # accelerations
-        self.a_other = ti.Vector.field(3, ti.f32, self.N_snow)
-        self.a_friction = ti.Vector.field(3, ti.f32, self.N_snow)
-        self.a_lambda = ti.Vector.field(3, ti.f32, self.N_snow)
-        self.a_G = ti.Vector.field(3, ti.f32, self.N_snow)
+        self.a_other = ti.Vector.field(3, float, self.N_snow)
+        self.a_friction = ti.Vector.field(3, float, self.N_snow)
+        self.a_lambda = ti.Vector.field(3, float, self.N_snow)
+        self.a_G = ti.Vector.field(3, float, self.N_snow)
 
         # solvers
         self.icps_solver = ImplicitCompressiblePressureSolver(self, self.p)
@@ -401,6 +409,11 @@ class Particle:
         self.grid = ti.field(ti.i32, (*self.grid_size, self.max_particles_per_cell))
         self.grid_num = ti.field(ti.i32, (*self.grid_size, ))
         self.grid_search_offset_range = (-1, 1 + 1)
+
+    @ti.kernel
+    def init(self):
+        for p_i in range(self.N_snow):
+            self.a_G = ti.Vector([0.0, 0.0, 0.0])
 
     @ti.func
     def compute_grid_index(self, pos):
@@ -457,7 +470,7 @@ class Particle:
         smoothing = 1. / (np.pi * h ** 3)
         v_norm = v.norm()
         q = v_norm / h
-        res = ti.cast(0.0, ti.f32)
+        res = ti.cast(0.0, float)
         if q <= 1.0:
             res = (smoothing / h) * (-3.0 * q + 2.25 * q ** 2.0)
         elif q <= 2.0:
@@ -532,14 +545,9 @@ class Particle:
     @ti.func
     def calc_F(self, p_i):
         # https://www.math.ucla.edu/~jteran/papers/SSCTS13.pdf
-        d_v = ti.Matrix([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
-        for neighbor_i in range(self.neighbors_num[p_i]):
-            n_i = self.neighbors[p_i, neighbor_i]
-            n_volume = self.ret_volume(n_i)
-            n_kernel_d = self.kernel_cubic_d(self.x[p_i] - self.x[n_i], self.cutoff_radius)
-            d_v += n_volume * self.v[p_i].outer_product(n_kernel_d)
+        d_v = self.iss_solver.disc_grad(p_i, self.v)
         prim_F = self.F[p_i] + self.dt * d_v @ self.F[p_i]
-        U, sigma, V = ti.svd(prim_F, ti.float32)
+        U, sigma, V = ti.svd(prim_F, ti.f32)
         sigma[0, 0] = ti.max(self.clamp_l, ti.min(sigma[0, 0], self.clamp_h))
         sigma[1, 1] = ti.max(self.clamp_l, ti.min(sigma[1, 1], self.clamp_h))
         sigma[2, 2] = ti.max(self.clamp_l, ti.min(sigma[2, 2], self.clamp_h))
@@ -599,8 +607,9 @@ class Particle:
     def v_x_update(self):
         for p_i in range(self.N_snow):
             self.v[p_i] += self.dt * (self.a_other[p_i] + self.a_friction[p_i] + self.a_lambda[p_i] + self.a_G[p_i])
+        for p_i in range(self.N_snow):
             self.calc_F(p_i)
-            # print(self.a_other[p_i], self.a_friction[p_i], self.a_lambda[p_i])
+        for p_i in range(self.N_snow):
             self.x[p_i] += self.dt * self.v[p_i]
 
     @ti.kernel
@@ -628,6 +637,7 @@ class Particle:
         print("avg grid", total_grid / (self.grid_size[0] * self.grid_size[1] * self.grid_size[2]))
 
     def substep(self):
+        self.total_t[None] += self.dt
         self.prologue()
         self.allocate_grid()
         self.neighbor_search()
@@ -642,8 +652,11 @@ class Particle:
         self.a_lambda_update()
 
         # Alg 1, line 8
-        self.iss_solver.iss()
+        if(self.enable_shear):
+            self.iss_solver.iss()
         self.v_x_update()
+        if(self.boundary_call_back != None):
+            self.boundary_call_back()
 
     def step(self):
         for _ in range(self.substep_num):
@@ -657,12 +670,12 @@ class Particle:
                         v=self.v.to_numpy(dtype=np.float64),
                         p=self.p.to_numpy(dtype=np.float64),
                         neighbors_num=self.neighbors_num.to_numpy(dtype=np.float64),
-                        a_lambda=self.a_lambda.to_numpy(dtype=np.float64))
+                        rho=self.rho.to_numpy(dtype=np.float64),
+                        rho_rest=self.rho_rest.to_numpy(dtype=np.float64))
 
 
 @ti.data_oriented
-class CubeParticleIniter:
-
+class Compression:
     def __init__(self, cube_size):
         self.init_i = ti.field(int, ())
         self.cube_size = cube_size
@@ -673,7 +686,6 @@ class CubeParticleIniter:
 
     @ti.kernel
     def gen_bound(self, side_len: ti.int32):
-        rand_factor = 0.25 / side_len 
         for p_i in range(side_len * side_len * side_len):
             i = (int)(p_i // (side_len * side_len))
             j = (int)((p_i % (side_len * side_len)) // side_len)
@@ -681,13 +693,24 @@ class CubeParticleIniter:
             if (i == 0 or i == side_len - 1 or j == 0 or j == side_len - 1 or k == 0):
                 old = ti.atomic_add(self.init_i[None], 1) 
                 self.particle.material_type[old] = self.particle.Materials.BOUNDARY
-            # self.particle.x[old] = ti.Vector([0.0 ,
-            #                                   j / side_len + (ti.random(ti.f32) - 0.5) * rand_factor, 
-            #                                   k / side_len + (ti.random(ti.f32) - 0.5) * rand_factor])
                 self.particle.x[old] = ti.Vector([i / side_len,
-                                                    j / side_len, 
-                                                    k / side_len])
-                self.particle.v[old] = ti.Vector([0, 0, 0])
+                                                  j / side_len, 
+                                                  k / side_len])
+                self.particle.v[old] = ti.Vector([0.0, 0.0, 0.0])
+
+    @ti.kernel
+    def gen_lid(self, side_len: ti.int32):
+        for p_i in range(side_len * side_len * side_len):
+            i = (int)(p_i // (side_len * side_len))
+            j = (int)((p_i % (side_len * side_len)) // side_len)
+            k = (int)(p_i % side_len)
+            if (k == side_len - 1 and not (i == 0 or i == side_len - 1 or j == 0 or j == side_len - 1 or k == 0)):
+                old = ti.atomic_add(self.init_i[None], 1) 
+                self.particle.material_type[old] = self.particle.Materials.BOUNDARY
+                self.particle.x[old] = ti.Vector([i / side_len,
+                                                  j / side_len, 
+                                                  0.2 + k / side_len])
+                self.particle.v[old] = ti.Vector([0.0, 0.0, 0.0])
 
     @ti.kernel
     def gen_snow(self, side_len: ti.int32):
@@ -695,32 +718,56 @@ class CubeParticleIniter:
             i = (int)(p_i // (side_len * side_len))
             j = (int)((p_i % (side_len * side_len)) // side_len)
             k = (int)(p_i % side_len)
-            if not(i == 0 or i == side_len - 1 or j == 0 or j == side_len - 1 or k == 0):
+            if not(i == 0 or i == side_len - 1 or j == 0 or j == side_len - 1 or k == 0 or k >= side_len - 6):
                 old = ti.atomic_add(self.init_i[None], 1) 
                 self.particle.material_type[old] = self.particle.Materials.FLUID
                 self.particle.x[old] = ti.Vector([i / side_len, 
                                                   j / side_len, 
                                                   k / side_len])
-                self.particle.p[old] = 0
-                self.particle.v[old] = ti.Vector([0, 0, 0])
-                self.particle.F[old] = ti.Matrix([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+                self.particle.p[old] = 0.0
+                self.particle.a_G[old] = ti.Vector([0.0, 0.0, 0.0])
+                self.particle.v[old] = ti.Vector([0.0, 0.0, 0.0])
+                self.particle.F[old] = ti.Matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+
+    @ti.kernel
+    def boundary_call_back(self):
+        for p_i in range(self.lid_start, self.lid_end):
+            v = 5
+            a_other = ti.Vector([0.0, 0.0, v / 200.0])
+            if (self.particle.total_t[None] // self.particle.dt == 500):
+                self.particle.v[p_i] = ti.Vector([0.0, 0.0, -v])
+
+            if (self.particle.total_t[None] // self.particle.dt >= 1000):
+                self.particle.v[p_i] = ti.Vector([0.0, 0.0, 0.0])
+            elif (self.particle.total_t[None] // self.particle.dt >= 800):
+                self.particle.v[p_i] += a_other
+            elif(self.particle.total_t[None] // self.particle.dt >= 700):
+                self.particle.v[p_i] = ti.Vector([0.0, 0.0, 0.0])
+            elif (self.particle.total_t[None] // self.particle.dt >= 500):
+                self.particle.v[p_i] += a_other
+            self.particle.x[p_i] += self.particle.dt *self.particle.v[p_i]
+
 
     def init(self):
-        snow = (self.cube_size - 2) * (self.cube_size - 2) * (self.cube_size - 1)
-        bounds_density = self.cube_size
-        bounds = bounds_density * bounds_density * bounds_density - (bounds_density - 2) * (bounds_density - 2) * (bounds_density - 1)
+        snow = (self.cube_size - 2) * (self.cube_size - 2) * (self.cube_size - 7)
+        bounds_density = (int)(self.cube_size * 1.5)
+        bounds = bounds_density * bounds_density * bounds_density - (bounds_density - 2) * (bounds_density - 2) * (bounds_density - 2)
         v_range = ((-1, 2), (-1, 2), (-1, 2))
-        self.particle = Particle(snow, bounds, v_range, 1.0 / self.cube_size ** 3 * 400, cutoff_radius=1.0 / self.cube_size)
+        self.particle = Particle(snow, bounds, v_range, 0.8 / self.cube_size ** 3 * 400, cutoff_radius=1.0 / self.cube_size, boundary_call_back=self.boundary_call_back, enable_shear=False)
         self.init_i[None] = 0
         self.gen_snow(self.cube_size)
         self.gen_bound(bounds_density)
+        self.lid_start = self.init_i[None]
+        self.gen_lid(bounds_density)
+        self.lid_end = self.init_i[None]
+
 
 @ti.data_oriented
-class FlatSurfaceParticleIniter:
-
-    def __init__(self, cube_size):
+class Slide:
+    def __init__(self, cube_size, scale=1.0):
         self.init_i = ti.field(int, ())
         self.cube_size = cube_size
+        self.scale = scale
         self.init()
 
     def get_particle(self):
@@ -728,7 +775,6 @@ class FlatSurfaceParticleIniter:
 
     @ti.kernel
     def gen_bound(self, side_len: ti.int32):
-        rand_factor = 0.25 / side_len 
         for p_i in range(side_len * side_len):
             j = (int)(p_i // side_len)
             k = (int)(p_i % side_len)
@@ -755,70 +801,28 @@ class FlatSurfaceParticleIniter:
                 self.particle.v[old] = ti.Vector([0, 0, 0])
                 self.particle.F[old] = ti.Matrix([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
 
+    @ti.kernel
+    def rescale(self):
+        for p_i in range(self.particle.N_tot):
+            self.particle.x[p_i] /= self.scale
+
     def init(self):
         snow = (self.cube_size - 2) * (self.cube_size - 2) * (self.cube_size - 1)
         bounds_density = self.cube_size 
         bounds = bounds_density * bounds_density
-        v_range = ((-1, 2), (-1, 2), (-1, 2))
-        self.particle = Particle(snow, bounds, v_range, 7.0 / self.cube_size ** 3 * 400, cutoff_radius=1.0 / self.cube_size)
+        v_range = ((-1 / self.scale, 2 / self.scale), (-1 / self.scale, 2 / self.scale), (-10 / self.scale, 2 / self.scale))
+        self.particle = Particle(snow, bounds, v_range, 1.0 / (self.cube_size * self.scale) ** 3 * 400, cutoff_radius=1.0 / self.cube_size / self.scale, enable_shear=False)
         self.init_i[None] = 0
         self.gen_snow(self.cube_size)
         self.gen_bound(bounds_density)
+        self.rescale()
 
-@ti.data_oriented
-class PlaneParticleIniter:
 
-    def __init__(self, cube_size):
-        self.init_i = ti.field(int, ())
-        self.cube_size = cube_size
-        self.init()
+def scene_1():
+    return 2000, Compression(30).get_particle()
 
-    def get_particle(self):
-        return self.particle
-
-    @ti.kernel
-    def gen_bound(self, side_len: ti.int32):
-        rand_factor = 0.25 / side_len 
-        for p_i in range(side_len * side_len * side_len):
-            i = (int)(p_i // (side_len * side_len))
-            j = (int)((p_i % (side_len * side_len)) // side_len)
-            k = (int)(p_i % side_len)
-            if (i == 0 or i == side_len - 1 or j == 0 or j == side_len - 1 or k == 0):
-                old = ti.atomic_add(self.init_i[None], 1) 
-                self.particle.material_type[old] = self.particle.Materials.BOUNDARY
-            # self.particle.x[old] = ti.Vector([0.0 ,
-            #                                   j / side_len + (ti.random(ti.f32) - 0.5) * rand_factor, 
-            #                                   k / side_len + (ti.random(ti.f32) - 0.5) * rand_factor])
-                self.particle.x[old] = ti.Vector([i / side_len,
-                                                    j / side_len, 
-                                                    k / side_len])
-                self.particle.v[old] = ti.Vector([0, 0, 0])
-
-    @ti.kernel
-    def gen_snow(self, side_len: ti.int32):
-        for k in range(3):
-            for p_i in range((side_len * side_len) // 4):
-                i = (int)(p_i // (side_len // 2))
-                j = (int)(p_i % (side_len // 2))
-                old = ti.atomic_add(self.init_i[None], 1) 
-                self.particle.material_type[old] = self.particle.Materials.FLUID
-                self.particle.x[old] = ti.Vector([side_len // 4 * 1 / side_len + i / side_len, 
-                                                side_len // 4 * 1 / side_len + j / side_len, 
-                                                0.1 + k / side_len])
-                self.particle.p[old] = 0
-                self.particle.v[old] = ti.Vector([0, 0, 0])
-                self.particle.F[old] = ti.Matrix([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
-
-    def init(self):
-        snow = (self.cube_size) * (self.cube_size) // 4 * 3
-        bounds_density = self.cube_size
-        bounds = bounds_density * bounds_density * bounds_density - (bounds_density - 2) * (bounds_density - 2) * (bounds_density - 1)
-        v_range = ((-1, 2), (-1, 2), (-1, 2))
-        self.particle = Particle(snow, bounds, v_range, 7.0 / self.cube_size ** 3 * 400, cutoff_radius=1.0 / self.cube_size)
-        self.init_i[None] = 0
-        self.gen_snow(self.cube_size)
-        self.gen_bound(bounds_density)
-
+def scene_2():
+    return 600, Slide(30).get_particle()
 
 
 to_save_folder = f"simul_{int(time.time())}"
@@ -826,7 +830,8 @@ to_save_frame = "frame_{}.npy"
 os.makedirs(to_save_folder)
 
 print("Starting")
-particle = FlatSurfaceParticleIniter(30).get_particle()
+# REPLACE HERE
+timesteps, particle = scene_1()
 cur_iter_num = 0
 particle.export_frame(to_save_folder, to_save_frame.format(cur_iter_num))
 while True:
@@ -834,6 +839,5 @@ while True:
     cur_iter_num += 1
     particle.step()
     particle.export_frame(to_save_folder, to_save_frame.format(cur_iter_num))
-    # break
-    if(cur_iter_num == 200):
+    if(cur_iter_num == timesteps):
         break
